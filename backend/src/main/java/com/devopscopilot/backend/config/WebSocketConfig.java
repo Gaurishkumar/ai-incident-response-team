@@ -1,0 +1,26 @@
+package com.devopscopilot.backend.config;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.messaging.simp.config.MessageBrokerRegistry;
+import org.springframework.web.socket.config.annotation.*;
+
+@Configuration
+@EnableWebSocketMessageBroker
+public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
+
+    @Override
+    public void registerStompEndpoints(StompEndpointRegistry registry) {
+        // Frontend connects to ws://host/ws?token=JWT
+        registry.addEndpoint("/ws")
+            .setAllowedOriginPatterns("*")
+            .withSockJS();
+    }
+
+    @Override
+    public void configureMessageBroker(MessageBrokerRegistry registry) {
+        // Server pushes to /topic/incidents/{id}
+        registry.enableSimpleBroker("/topic");
+        // Client-to-server prefix (not used in V1)
+        registry.setApplicationDestinationPrefixes("/app");
+    }
+}

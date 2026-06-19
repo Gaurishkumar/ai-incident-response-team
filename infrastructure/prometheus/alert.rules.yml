@@ -1,0 +1,71 @@
+groups:
+  - name: devops-copilot-alerts
+    interval: 30s
+    rules:
+
+      # ── Agent pipeline health ────────────────────────────────────────────────
+
+      - alert: HighAgentFailureRate
+        expr: rate(agent_failures_total[5m]) > 5/60
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High AI agent failure rate"
+          description: >
+            Agent failures are exceeding 5 per minute.
+            agent={{ $labels.agent_name }}
+
+      - alert: AnalysisPipelineStalled
+        expr: active_analyses > 0 and rate(agent_failures_total[10m]) == 0 and
+              rate(analysis_pipeline_duration_seconds_count[10m]) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Analysis pipeline may be stalled"
+          description: "Active analyses > 0 but no completions in the last 10 minutes."
+
+      # ── RabbitMQ ─────────────────────────────────────────────────────────────
+
+      - alert: DLQBacklogGrowing
+        expr: rabbitmq_queue_messages{queue="incident.dlq"} > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dead Letter Queue backlog is growing"
+          description: "incident.dlq has {{ $value }} unprocessed messages."
+
+      # ── Spring Boot / Database ────────────────────────────────────────────────
+
+      - alert: DatabasePoolSaturated
+        expr: hikaricp_connections_pending{pool="HikariPool-1"} > 5
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database connection pool near saturation"
+          description: >
+            {{ $value }} threads are waiting for a DB connection.
+            Pool may be exhausted.
+
+      - alert: SlowAPIResponse
+        expr: histogram_quantile(0.99,
+              rate(http_server_requests_seconds_bucket{job="spring-boot"}[5m])) > 3
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "99th percentile API response time > 3s"
+          description: "p99 latency is {{ $value | humanizeDuration }}."
+
+      - alert: HighHTTPErrorRate
+        expr: rate(http_server_requests_seconds_count{status=~"5.."}[5m]) /
+              rate(http_server_requests_seconds_count[5m]) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HTTP 5xx error rate above 5%"
+          description: "Error rate is {{ $value | humanizePercentage }}."

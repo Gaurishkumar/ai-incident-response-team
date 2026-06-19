@@ -1,0 +1,87 @@
+{
+  "title": "Agent Performance",
+  "uid": "agent-performance",
+  "description": "Per-agent execution times, failure rates, LLM inference latency",
+  "refresh": "15s",
+  "schemaVersion": 38,
+  "timezone": "browser",
+  "time": { "from": "now-1h", "to": "now" },
+  "tags": ["devops-copilot", "agents", "llm"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Agent Failure Totals",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 4 },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "agent_failures_total{agent_name=\"LOG_ANALYSIS\"}", "legendFormat": "Log Analysis" },
+        { "datasource": "Prometheus", "expr": "agent_failures_total{agent_name=\"ROOT_CAUSE\"}", "legendFormat": "Root Cause" },
+        { "datasource": "Prometheus", "expr": "agent_failures_total{agent_name=\"RECOMMENDATION\"}", "legendFormat": "Recommendation" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "horizontal", "colorMode": "background" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } } }
+    },
+    {
+      "id": 2,
+      "title": "Active Analyses",
+      "type": "gauge",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "targets": [{ "datasource": "Prometheus", "expr": "active_analyses", "legendFormat": "Active" }],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "minVizWidth": 75, "minVizHeight": 75 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 10, "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "red", "value": 8 } ] } } }
+    },
+    {
+      "id": 3,
+      "title": "LLM Inference Time (p50 / p95 / p99)",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 4 },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "histogram_quantile(0.50, rate(llm_call_duration_seconds_bucket[5m]))", "legendFormat": "p50" },
+        { "datasource": "Prometheus", "expr": "histogram_quantile(0.95, rate(llm_call_duration_seconds_bucket[5m]))", "legendFormat": "p95" },
+        { "datasource": "Prometheus", "expr": "histogram_quantile(0.99, rate(llm_call_duration_seconds_bucket[5m]))", "legendFormat": "p99" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "horizontal", "colorMode": "background" },
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 15 }, { "color": "red", "value": 30 } ] } } }
+    },
+    {
+      "id": 4,
+      "title": "Agent Execution Duration — p50 per agent",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "histogram_quantile(0.50, rate(agent_execution_duration_seconds_bucket{agent_name=\"LOG_ANALYSIS\"}[5m]))", "legendFormat": "Log Analysis p50" },
+        { "datasource": "Prometheus", "expr": "histogram_quantile(0.50, rate(agent_execution_duration_seconds_bucket{agent_name=\"ROOT_CAUSE\"}[5m]))", "legendFormat": "Root Cause p50" },
+        { "datasource": "Prometheus", "expr": "histogram_quantile(0.50, rate(agent_execution_duration_seconds_bucket{agent_name=\"RECOMMENDATION\"}[5m]))", "legendFormat": "Recommendation p50" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "id": 5,
+      "title": "Agent Failure Rate (per minute)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "rate(agent_failures_total{agent_name=\"LOG_ANALYSIS\"}[5m]) * 60", "legendFormat": "Log Analysis" },
+        { "datasource": "Prometheus", "expr": "rate(agent_failures_total{agent_name=\"ROOT_CAUSE\"}[5m]) * 60", "legendFormat": "Root Cause" },
+        { "datasource": "Prometheus", "expr": "rate(agent_failures_total{agent_name=\"RECOMMENDATION\"}[5m]) * 60", "legendFormat": "Recommendation" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "thresholdsStyle": { "mode": "area" } }, "thresholds": { "steps": [ { "color": "transparent", "value": null }, { "color": "red", "value": 5 } ] } } },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "id": 6,
+      "title": "LLM Inference Time Over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 8 },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "histogram_quantile(0.50, rate(llm_call_duration_seconds_bucket[5m]))", "legendFormat": "p50" },
+        { "datasource": "Prometheus", "expr": "histogram_quantile(0.95, rate(llm_call_duration_seconds_bucket[5m]))", "legendFormat": "p95" },
+        { "datasource": "Prometheus", "expr": "histogram_quantile(0.99, rate(llm_call_duration_seconds_bucket[5m]))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 10 } } },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    }
+  ],
+  "version": 1
+}
