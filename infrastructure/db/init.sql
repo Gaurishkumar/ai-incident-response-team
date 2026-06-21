@@ -8,7 +8,7 @@
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'appwriter') THEN
-        CREATE USER appwriter WITH PASSWORD 'devops_write_2026';
+        CREATE USER appwriter WITH PASSWORD 'appwriter123';
     END IF;
 END $$;
 
@@ -27,7 +27,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO appwriter;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'appreader') THEN
-        CREATE USER appreader WITH PASSWORD 'devops_read_2026';
+        CREATE USER appreader WITH PASSWORD 'appreader123';
     END IF;
 END $$;
 
