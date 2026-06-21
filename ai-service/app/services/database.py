@@ -33,40 +33,43 @@ class DatabaseService:
             expire_on_commit=False,
         )
 
-    async def get_incident(self, incident_id: str) -> Optional[Dict[str, Any]]:
+    async def get_incident(self, incident_id: str, organization_id: str) -> Optional[Dict[str, Any]]:
         async with self._session_factory() as session:
             result = await session.execute(
                 text(
                     "SELECT id, title, description, environment, severity, status, "
-                    "affected_services, created_by, created_at, analysis_started_at, resolved_at "
-                    "FROM incidents WHERE id = :id"
+                    "affected_services, created_by, organization_id, created_at, analysis_started_at, resolved_at "
+                    "FROM incidents WHERE id = :id AND organization_id = :organization_id"
                 ),
-                {"id": incident_id},
+                {"id": incident_id, "organization_id": organization_id},
             )
             row = result.mappings().first()
             return dict(row) if row else None
 
-    async def get_incident_metrics(self, incident_id: str) -> Optional[Dict[str, Any]]:
+    async def get_incident_metrics(self, incident_id: str, organization_id: str) -> Optional[Dict[str, Any]]:
         async with self._session_factory() as session:
             result = await session.execute(
                 text(
-                    "SELECT cpu_usage_percent, memory_usage_percent, "
-                    "error_rate_percent, response_time_ms "
-                    "FROM incident_metrics WHERE incident_id = :incident_id"
+                    "SELECT m.cpu_usage_percent, m.memory_usage_percent, "
+                    "m.error_rate_percent, m.response_time_ms "
+                    "FROM incident_metrics m "
+                    "JOIN incidents i ON i.id = m.incident_id "
+                    "WHERE m.incident_id = :incident_id AND i.organization_id = :organization_id"
                 ),
-                {"incident_id": incident_id},
+                {"incident_id": incident_id, "organization_id": organization_id},
             )
             row = result.mappings().first()
             return dict(row) if row else None
 
-    async def get_incident_logs(self, incident_id: str) -> Optional[str]:
+    async def get_incident_logs(self, incident_id: str, organization_id: str) -> Optional[str]:
         async with self._session_factory() as session:
             result = await session.execute(
                 text(
-                    "SELECT raw_log_content FROM incident_logs "
-                    "WHERE incident_id = :incident_id"
+                    "SELECT l.raw_log_content FROM incident_logs l "
+                    "JOIN incidents i ON i.id = l.incident_id "
+                    "WHERE l.incident_id = :incident_id AND i.organization_id = :organization_id"
                 ),
-                {"incident_id": incident_id},
+                {"incident_id": incident_id, "organization_id": organization_id},
             )
             row = result.first()
             return row[0] if row else None

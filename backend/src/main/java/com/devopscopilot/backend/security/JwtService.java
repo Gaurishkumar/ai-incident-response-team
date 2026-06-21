@@ -24,16 +24,24 @@ public class JwtService {
     private long expirationMs;
 
     public String generateToken(UUID userId, String role) {
+        return generateToken(userId, role, null);
+    }
+
+    public String generateToken(UUID userId, String role, UUID organizationId) {
         Date now    = new Date();
         Date expiry = new Date(now.getTime() + expirationMs);
 
-        return Jwts.builder()
+        JwtBuilder builder = Jwts.builder()
             .subject(userId.toString())
             .claim("role", role)
             .issuedAt(now)
-            .expiration(expiry)
-            .signWith(signingKey())
-            .compact();
+            .expiration(expiry);
+
+        if (organizationId != null) {
+            builder.claim("organizationId", organizationId.toString());
+        }
+
+        return builder.signWith(signingKey()).compact();
     }
 
     public String extractUserId(String token) {
@@ -42,6 +50,11 @@ public class JwtService {
 
     public String extractRole(String token) {
         return parseClaims(token).get("role", String.class);
+    }
+
+    public UUID extractOrganizationId(String token) {
+        String organizationId = parseClaims(token).get("organizationId", String.class);
+        return organizationId == null ? null : UUID.fromString(organizationId);
     }
 
     public boolean isTokenValid(String token) {

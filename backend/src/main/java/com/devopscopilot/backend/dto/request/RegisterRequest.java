@@ -18,7 +18,6 @@ public class RegisterRequest {
              message = "Password must contain at least one uppercase letter and one digit")
     private String password;
 
-    @NotBlank @Pattern(regexp = "DEVELOPER|ADMIN",
-                       message = "Role must be DEVELOPER or ADMIN")
-    private String role;
+    @Size(min = 2, max = 255)
+    private String organizationName;
 }

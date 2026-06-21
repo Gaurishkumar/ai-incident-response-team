@@ -2,6 +2,9 @@ import type {
   LoginRequest,
   RegisterRequest,
   AuthResponse,
+  OrganizationJoinRequestResponse,
+  OrganizationRequestResponse,
+  OrganizationResponse,
   UserResponse,
   IncidentCreateRequest,
   IncidentDetailResponse,
@@ -116,5 +119,35 @@ export const api = {
 
   dashboard: {
     stats: () => request<DashboardStats>('/api/v1/dashboard/stats'),
+  },
+
+  orgAdmin: {
+    joinRequests: () =>
+      request<OrganizationJoinRequestResponse[]>('/api/v1/org-admin/join-requests'),
+    approveJoinRequest: (joinRequestId: string) =>
+      request<OrganizationJoinRequestResponse>(`/api/v1/org-admin/join-requests/${joinRequestId}/approve`, {
+        method: 'POST',
+      }),
+    rejectJoinRequest: (joinRequestId: string, reason: string) =>
+      request<OrganizationJoinRequestResponse>(`/api/v1/org-admin/join-requests/${joinRequestId}/reject`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      }),
+  },
+
+  admin: {
+    organizationRequests: () =>
+      request<OrganizationRequestResponse[]>('/api/v1/admin/organization-requests'),
+    organizations: () =>
+      request<OrganizationResponse[]>('/api/v1/admin/organizations'),
+    approveOrganizationRequest: (requestId: string) =>
+      request<OrganizationResponse>(`/api/v1/admin/organization-requests/${requestId}/approve`, {
+        method: 'POST',
+      }),
+    rejectOrganizationRequest: (requestId: string, reason: string) =>
+      request<OrganizationRequestResponse>(`/api/v1/admin/organization-requests/${requestId}/reject`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      }),
   },
 }

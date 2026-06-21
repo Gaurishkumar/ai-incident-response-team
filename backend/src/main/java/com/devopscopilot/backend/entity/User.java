@@ -29,6 +29,13 @@ public class User {
     @Builder.Default
     private String role = "DEVELOPER";
 
+    @Column(name = "organization_id")
+    private UUID organizationId;
+
+    @Column(name = "account_status", nullable = false, length = 50)
+    @Builder.Default
+    private String accountStatus = "ACTIVE";
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false,
             columnDefinition = "TIMESTAMPTZ")

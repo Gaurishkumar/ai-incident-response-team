@@ -12,6 +12,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.amqp.support.AmqpHeaders;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
@@ -84,6 +85,16 @@ public class AnalysisResultHandler {
             log.info("[{}] Analysis result persisted and frontend notified", incidentId);
 
         } catch (Exception e) {
+            if (isDuplicateAnalysisResult(e)) {
+                log.warn("[{}] Duplicate analysis result detected, acking without reprocessing", incidentId);
+                try {
+                    channel.basicAck(deliveryTag, false);
+                } catch (Exception ackEx) {
+                    log.error("Failed to ack duplicate message", ackEx);
+                }
+                return;
+            }
+
             log.error("[{}] Failed to persist result: {}", incidentId, e.getMessage(), e);
             try {
                 channel.basicNack(deliveryTag, false, true);
@@ -97,6 +108,17 @@ public class AnalysisResultHandler {
     protected void persistResult(IncidentAnalysisResultMessage result, UUID incidentId) {
         Incident incident = incidentRepository.findById(incidentId)
             .orElseThrow(() -> new IllegalStateException("Incident not found: " + incidentId));
+
+        if (analysisRepository.findByIncidentId(incidentId).isPresent()) {
+            log.warn("[{}] Analysis already persisted, skipping duplicate result", incidentId);
+            return;
+        }
+
+        if ("RESOLVED".equals(incident.getStatus()) || "FAILED".equals(incident.getStatus())) {
+            log.warn("[{}] Incident already finalized as {}, skipping duplicate result",
+                incidentId, incident.getStatus());
+            return;
+        }
 
         // Determine final status
         String finalStatus = "FAILED".equals(result.getAnalysisStatus()) ? "FAILED" : "RESOLVED";
@@ -153,5 +175,19 @@ public class AnalysisResultHandler {
         } catch (Exception e) {
             return OffsetDateTime.now();
         }
+    }
+
+    private boolean isDuplicateAnalysisResult(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof DataIntegrityViolationException) {
+                String message = current.getMessage();
+                if (message != null && message.contains("incident_analysis_incident_id_key")) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 }

@@ -1,618 +1,508 @@
-# Multi-Tenant Implementation Plan
+# Multi-Tenant Org Approval Plan
 
-## Phase 1: Database Setup
-### Step 1.1 - Create Flyway Migration Files
-**File:** `backend/src/main/resources/db/migration/V2__add_multi_tenant_support.sql`
+This is the repo-specific implementation plan for the org approval flow.
 
-```sql
--- New organizations table
-CREATE TABLE organizations (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) NOT NULL UNIQUE,
-    domain VARCHAR(255) NOT NULL UNIQUE,
-    owner_user_id UUID NOT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'PENDING',
-    -- allowed: PENDING, APPROVED, REJECTED
-    rejection_reason TEXT NULLABLE,
-    rejected_at TIMESTAMPTZ NULLABLE,
-    approved_at TIMESTAMPTZ NULLABLE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    
-    FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE RESTRICT,
-    INDEX idx_organizations_domain (domain),
-    INDEX idx_organizations_status (status)
-);
+Current stack:
+- Backend: Spring Boot 3.3, Java 21, JPA, Flyway, PostgreSQL, JWT, Redis, RabbitMQ, WebSocket
+- Frontend: Next.js 14 app router under `frontend/src/app`
+- AI service: FastAPI-style Python package under `ai-service/app`
 
--- New system_admins table (super-admins)
-CREATE TABLE system_admins (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL UNIQUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
+Goal:
+- `SUPER_ADMIN` can view and approve/reject org requests globally.
+- `ORG_ADMIN` can approve/reject new joinees in their approved org only.
+- No OTP validation step.
+- Email domain becomes a `domain_key` used for grouping requests, not for trust.
+- Multiple pending org requests can exist for the same `domain_key`.
+- Only one approved org may exist per `domain_key`.
+- When one org request is approved, the rest for that `domain_key` are automatically rejected.
+- The first requester becomes the org admin only after the org is approved.
+- Org admins have no access until approval.
 
--- Modify users table: add organization_id
-ALTER TABLE users 
-ADD COLUMN organization_id UUID NULLABLE,
-ADD FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE RESTRICT;
+## Core Rules
 
--- Add index for org-based queries
-CREATE INDEX idx_users_organization_id ON users(organization_id);
+1. Normalize every email domain to a lowercased `domain_key`.
+2. Treat public domains like `gmail.com` or `google.com` the same as any other `domain_key`.
+3. Never use `domain_key` as proof of ownership.
+4. The approval step is what turns a request into a real org.
+5. All org-owned data must be filtered by `organization_id`.
+6. No org-scoped access is allowed before approval.
+7. Existing auth flow stays cookie-based JWT with `ApiResponse` and `AuthResponse`.
+8. Keep the current codebase style: controllers/services/repositories/DTOs, not a new framework layer.
 
--- Modify incidents: add organization_id
-ALTER TABLE incidents 
-ADD COLUMN organization_id UUID NOT NULL,
-ADD FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
-ADD INDEX idx_incidents_organization_id (organization_id);
+## Phase 1: Data Model And Migrations
 
--- Add org isolation index (critical for performance)
-CREATE INDEX idx_incidents_org_status ON incidents(organization_id, status);
-CREATE INDEX idx_incidents_org_created ON incidents(organization_id, created_at DESC);
-```
+### 1.1 New tables
 
-### Step 1.2 - Create System Admin Bootstrap Migration
-**File:** `backend/src/main/resources/db/migration/V3__bootstrap_system_admin.sql`
+Create Flyway migrations under:
+- `backend/src/main/resources/db/migration/V3__multi_tenant_orgs.sql`
+- `backend/src/main/resources/db/migration/V4__backfill_legacy_tenant.sql`
 
-```sql
--- MANUAL SETUP REQUIRED:
--- After first super-admin user is created, run:
--- INSERT INTO system_admins (user_id) VALUES ('{SUPER_ADMIN_USER_ID}');
-```
+Add these tables:
 
----
+#### `organizations`
+- `id` UUID primary key
+- `domain_key` varchar, normalized email domain
+- `name` varchar, org display name
+- `owner_user_id` UUID, FK to the first approved admin
+- `status` enum-like varchar: `APPROVED`, `SUSPENDED`
+- `approved_by_user_id` UUID, nullable
+- `approved_at` timestamp, nullable
+- `suspended_at` timestamp, nullable
+- `suspension_reason` text, nullable
+- `created_at`, `updated_at`
 
-## Phase 2: Entity & Model Updates (Spring Boot)
-### Step 2.1 - Create Organization JPA Entity
-**File:** `backend/src/main/java/com/devops/entities/Organization.java`
+Important:
+- `organizations` stores active approved orgs.
+- Enforce only one org per `domain_key` using a unique constraint.
+- Pending duplicates for the same `domain_key` live in `organization_requests`.
 
-Key fields:
-- `id` (UUID)
-- `name` (String, unique)
-- `domain` (String, unique)
-- `ownerUserId` (UUID, FK to User)
-- `status` (String: PENDING, APPROVED, REJECTED)
-- `rejectionReason` (String, nullable)
-- `rejectedAt`, `approvedAt`, `createdAt` (timestamps)
+#### `organization_requests`
+- This is the approval queue for creating a new org.
+- `id` UUID primary key
+- `domain_key` varchar
+- `org_name` varchar
+- `requested_by_user_id` UUID
+- `status` varchar: `PENDING`, `APPROVED`, `REJECTED`
+- `approved_by_user_id` UUID, nullable
+- `rejected_by_user_id` UUID, nullable
+- `rejection_reason` text, nullable
+- `approved_organization_id` UUID, nullable
+- `created_at`, `updated_at`
 
-Relationships:
-- One-to-many: Organization → Users
-- One-to-many: Organization → Incidents
+Purpose:
+- Store multiple pending requests per domain.
+- Preserve the audit trail for super-admin review.
 
-### Step 2.2 - Create SystemAdmin JPA Entity
-**File:** `backend/src/main/java/com/devops/entities/SystemAdmin.java`
+#### `organization_join_requests`
+- This is the approval queue for users joining an already approved org.
+- `id` UUID primary key
+- `organization_id` UUID, FK to `organizations`
+- `user_id` UUID, FK to `users`
+- `status` varchar: `PENDING`, `APPROVED`, `REJECTED`
+- `approved_by_user_id` UUID, nullable
+- `rejected_by_user_id` UUID, nullable
+- `rejection_reason` text, nullable
+- `created_at`, `updated_at`
 
-Key fields:
-- `id` (UUID)
-- `userId` (UUID, unique, FK to User)
-- `createdAt` (timestamp)
+Purpose:
+- Let org admins approve or reject new joinees in their own org.
 
-### Step 2.3 - Update User Entity
-**File:** `backend/src/main/java/com/devops/entities/User.java`
+#### `system_admins`
+- `id` UUID primary key
+- `user_id` UUID unique, FK to `users`
+- `created_at`
 
+Purpose:
+- Gate all super-admin permissions through a dedicated table.
+
+### 1.2 Update existing tables
+
+#### `users`
 Add fields:
-- `organizationId` (UUID, nullable)
-- `isSystemAdmin` (boolean, transient, loaded from SystemAdmin table)
+- `organization_id` UUID, nullable
+- `account_status` varchar: `PENDING`, `ACTIVE`, `REJECTED`, `LOCKED`
+- `role` varchar: `MEMBER`, `ORG_ADMIN`, `SUPER_ADMIN`
+- `joined_at` timestamp, nullable
 
-### Step 2.4 - Update Incident Entity
-**File:** `backend/src/main/java/com/devops/entities/Incident.java`
+Notes:
+- Keep authentication on `users`.
+- Use `account_status` to block login until approval.
+- Keep `role` simple and current-stack-friendly.
 
-Add field:
-- `organizationId` (UUID, non-nullable)
+#### `incidents`
+Add:
+- `organization_id` UUID not null
 
-Add constraint:
-- Cascade delete: if org deleted, incidents deleted
+Rules:
+- Every incident query must be scoped by `organization_id`.
+- Add indexes for `organization_id`, `status`, and `created_at`.
 
----
+### 1.3 Backfill strategy
 
-## Phase 3: Repository & Query Updates (Spring Boot)
-### Step 3.1 - Create Organization Repository
-**File:** `backend/src/main/java/com/devops/repositories/OrganizationRepository.java`
+If the repo already contains live data:
+1. Create a seed or legacy org.
+2. Attach existing users/incidents to that org.
+3. Seed one initial `system_admin`.
+4. Only then make org-scoped constraints stricter.
 
-Methods:
-```java
-Optional<Organization> findByDomain(String domain);
-Optional<Organization> findByName(String name);
-List<Organization> findByStatus(String status);  // PENDING, APPROVED
-List<Organization> findByStatusOrderByCreatedAtDesc(String status);
-```
+Do not add a not-null `organization_id` to existing rows without backfill.
 
-### Step 3.2 - Create SystemAdmin Repository
-**File:** `backend/src/main/java/com/devops/repositories/SystemAdminRepository.java`
+## Phase 2: Backend Entities And Repositories
 
-Methods:
-```java
-boolean existsByUserId(UUID userId);
-Optional<SystemAdmin> findByUserId(UUID userId);
-```
+### 2.1 Entities
 
-### Step 3.3 - Update User Repository
-**File:** `backend/src/main/java/com/devops/repositories/UserRepository.java`
+Create or update entities in:
+- `backend/src/main/java/com/devopscopilot/backend/entity/Organization.java`
+- `backend/src/main/java/com/devopscopilot/backend/entity/OrganizationRequest.java`
+- `backend/src/main/java/com/devopscopilot/backend/entity/OrganizationJoinRequest.java`
+- `backend/src/main/java/com/devopscopilot/backend/entity/SystemAdmin.java`
+- `backend/src/main/java/com/devopscopilot/backend/entity/User.java`
+- `backend/src/main/java/com/devopscopilot/backend/entity/Incident.java`
 
-Add methods:
-```java
-Optional<User> findByEmailAndOrganizationId(String email, UUID orgId);
-List<User> findByOrganizationId(UUID orgId);
-```
+Entity expectations:
+- Keep Lombok style consistent with the rest of the code.
+- Use JPA annotations already used in the repo.
+- Model timestamps as `OffsetDateTime` or the project’s current date type.
 
-### Step 3.4 - Update Incident Repository
-**File:** `backend/src/main/java/com/devops/repositories/IncidentRepository.java`
+### 2.2 Repositories
 
-Replace ALL queries with org-filtered versions:
+Add repositories in:
+- `backend/src/main/java/com/devopscopilot/backend/repository/OrganizationRepository.java`
+- `backend/src/main/java/com/devopscopilot/backend/repository/OrganizationRequestRepository.java`
+- `backend/src/main/java/com/devopscopilot/backend/repository/OrganizationJoinRequestRepository.java`
+- `backend/src/main/java/com/devopscopilot/backend/repository/SystemAdminRepository.java`
 
-OLD:
-```java
-List<Incident> findByCreatedBy(UUID userId);
-```
+Repository needs:
+- find by `domain_key`
+- find by status
+- count by status for admin dashboards
+- find join requests by `organization_id`
+- always fetch incidents with `organization_id`
 
-NEW:
-```java
-List<Incident> findByOrganizationIdAndCreatedByOrderByCreatedAtDesc(UUID orgId, UUID userId, Pageable p);
-List<Incident> findByOrganizationIdAndStatusOrderByCreatedAtDesc(UUID orgId, String status, Pageable p);
-Optional<Incident> findByIdAndOrganizationId(UUID id, UUID orgId);  // CRITICAL: always use this
-```
+Recommended method shape:
+- `findByIdAndOrganizationId(...)`
+- `findByDomainKeyAndStatus(...)`
+- `findByOrganizationIdAndStatus(...)`
+- `existsByUserId(...)`
 
-**CRITICAL RULE:** Never query incidents without filtering by `organizationId`. Use `findByIdAndOrganizationId` instead of `findById`.
+### 2.3 User repository updates
 
----
+Update `backend/src/main/java/com/devopscopilot/backend/repository/UserRepository.java` to support:
+- `findByEmail(...)`
+- `existsByEmail(...)`
+- `findByOrganizationId(...)`
+- `findByOrganizationIdAndAccountStatus(...)`
+- `findByEmailAndOrganizationId(...)` if needed for scoped lookups
 
-## Phase 4: Authentication Service Updates (Spring Boot)
-### Step 4.1 - Create Organization Service
-**File:** `backend/src/main/java/com/devops/services/OrganizationService.java`
+## Phase 3: Auth And Registration Flow
 
-Methods:
-```java
-public Organization createPendingOrganization(String name, String domain, UUID ownerUserId) {
-    // Validate: domain not taken, name not taken
-    // Create org with status=PENDING, rejectionReason=null
-    // Return org
-}
+### 3.1 Request DTO changes
 
-public Organization approveOrganization(UUID orgId) {
-    // Set status=APPROVED, approvedAt=NOW()
-    // Get owner user, set user.organizationId = orgId
-    // Save user
-    // Send email to owner: "Your org is approved"
-    // Return org
-}
+Update:
+- `backend/src/main/java/com/devopscopilot/backend/dto/request/RegisterRequest.java`
 
-public Organization rejectOrganization(UUID orgId, String reason) {
-    // Set status=REJECTED, rejectionReason=reason, rejectedAt=NOW()
-    // Send email to owner with reason
-    // Return org
-}
+New registration shape:
+- `username`
+- `email`
+- `password`
+- `organizationName`
 
-public Optional<Organization> findByDomain(String domain) {
-    // Query by domain
-}
+Remove the client-supplied role field from registration.
+Roles should be assigned by the workflow, not chosen arbitrarily by the client.
 
-public Optional<Organization> findApprovedByDomain(String domain) {
-    // Query by domain AND status=APPROVED
-}
-```
+### 3.2 Registration logic
 
-### Step 4.2 - Create SystemAdmin Service
-**File:** `backend/src/main/java/com/devops/services/SystemAdminService.java`
+Update `backend/src/main/java/com/devopscopilot/backend/service/AuthService.java`
 
-Methods:
-```java
-public boolean isSystemAdmin(UUID userId) {
-    // Check if user exists in system_admins table
-}
+Registration flow:
+1. Normalize the email and extract `domain_key`.
+2. Look up an approved org for that `domain_key`.
+3. If an approved org exists:
+   - create a `organization_join_requests` row
+   - create the user with `account_status=PENDING`
+   - set the user role to `MEMBER`
+   - do not grant access yet
+4. If no approved org exists:
+   - require `organizationName`
+   - create an `organization_requests` row
+   - create the user with `account_status=PENDING`
+   - mark the user as the provisional admin candidate
+   - set the user role to `ORG_ADMIN` provisionally
+5. Return a response that tells the frontend whether the user is:
+   - waiting for super-admin org approval
+   - waiting for org-admin join approval
 
-public void makeSystemAdmin(UUID userId) {
-    // Insert into system_admins
-}
+Important:
+- No OTP stage.
+- No email-based trust check beyond domain extraction.
+- The first requester becomes admin only after the org is approved.
 
-public void removeSystemAdmin(UUID userId) {
-    // Delete from system_admins
-}
-```
+### 3.3 Login logic
 
-### Step 4.3 - Update AuthService (Register)
-**File:** `backend/src/main/java/com/devops/services/AuthService.java`
+Update `AuthService.login(...)` and keep the existing cookie-based controller flow.
 
-Modify `register()` method:
+Login rules:
+1. Authenticate username/email and password as today.
+2. Deny login unless `account_status=ACTIVE`.
+3. Deny login if the org is not approved.
+4. Deny login if the user is in a pending org request or pending join request.
+5. Mint JWT only after approval.
 
-```java
-public RegisterResponse register(RegisterRequest req) {
-    String email = req.getEmail();
-    String domain = extractDomain(email);  // alice@acme.com → "acme.com"
-    
-    // Check: domain already registered?
-    Optional<Organization> existingOrg = organizationService.findApprovedByDomain(domain);
-    
-    if (existingOrg.isPresent()) {
-        // Case 1: Org exists and is APPROVED
-        Organization org = existingOrg.get();
-        User user = new User(email, password, role=DEVELOPER, org_id=org.id);
-        userRepository.save(user);
-        
-        return RegisterResponse(
-            status="joined_existing_org",
-            orgName=org.name,
-            message="Welcome to " + org.name
-        );
-    } else {
-        // Case 2: Org doesn't exist → user must create it
-        // organizationName is REQUIRED in request
-        if (req.getOrganizationName() == null) {
-            throw new ValidationException("Organization name required");
-        }
-        
-        Organization newOrg = organizationService.createPendingOrganization(
-            name=req.getOrganizationName(),
-            domain=domain,
-            ownerUserId=null  // Will set after user is created
-        );
-        
-        User user = new User(email, password, role=ADMIN, org_id=null);
-        user = userRepository.save(user);  // Save first to get ID
-        
-        newOrg.setOwnerUserId(user.getId());
-        organizationRepository.save(newOrg);
-        
-        return RegisterResponse(
-            status="org_pending_approval",
-            orgName=newOrg.name,
-            message="Your organization awaits admin approval"
-        );
-    }
-}
+JWT should include:
+- `userId`
+- `organizationId`
+- `role`
+- `isSystemAdmin` or equivalent authority signal
 
-private String extractDomain(String email) {
-    return email.substring(email.indexOf("@") + 1);
-}
-```
+### 3.4 Auth response shape
 
-### Step 4.4 - Update AuthService (Login)
-**File:** `backend/src/main/java/com/devops/services/AuthService.java`
+Extend `AuthResponse` if needed to include:
+- `organizationId`
+- `accountStatus`
+- `role`
+- `nextStep` or a similar status hint
 
-Modify `login()` method:
+Keep the existing `ApiResponse<AuthResponse>` pattern used by `AuthController`.
 
-```java
-public LoginResponse login(LoginRequest req) {
-    User user = userRepository.findByEmail(req.getEmail())
-        .orElseThrow(() -> new InvalidCredentialsException());
-    
-    if (!passwordEncoder.matches(req.getPassword(), user.getPasswordHash())) {
-        throw new InvalidCredentialsException();
-    }
-    
-    // NEW: Check organization status
-    if (user.getOrganizationId() != null) {
-        Organization org = organizationRepository.findById(user.getOrganizationId())
-            .orElseThrow();
-        
-        if (!org.getStatus().equals("APPROVED")) {
-            return LoginResponse(
-                success=false,
-                error="organization_not_approved",
-                message="Your organization has not been approved yet"
-            );
-        }
-    } else {
-        // User belongs to pending/rejected org
-        return LoginResponse(
-            success=false,
-            error="organization_pending",
-            message="Your organization is awaiting approval"
-        );
-    }
-    
-    // Issue JWT
-    String jwt = jwtService.generateToken(user);
-    return LoginResponse(token=jwt, ...);
-}
-```
+## Phase 4: Super Admin Approval Flow
 
----
+### 4.1 Super admin service
 
-## Phase 5: Data Isolation Layer (Spring Boot)
-### Step 5.1 - Create OrgContext Helper
-**File:** `backend/src/main/java/com/devops/security/OrgContext.java`
+Create:
+- `backend/src/main/java/com/devopscopilot/backend/service/OrganizationAdminService.java`
+- `backend/src/main/java/com/devopscopilot/backend/service/SystemAdminService.java`
 
-```java
-public class OrgContext {
-    private static final ThreadLocal<UUID> orgId = new ThreadLocal<>();
-    
-    public static void setOrgId(UUID id) {
-        orgId.set(id);
-    }
-    
-    public static UUID getOrgId() {
-        return orgId.get();
-    }
-    
-    public static void clear() {
-        orgId.remove();
-    }
-}
-```
+Responsibilities:
+- Approve org requests
+- Reject org requests
+- List pending org requests
+- List approved orgs
+- Auto-reject duplicates for the same `domain_key`
 
-### Step 5.2 - Create JWT Aspect (Extract Org from Token)
-**File:** `backend/src/main/java/com/devops/security/OrgContextAspect.java`
+### 4.2 Super admin controller
 
-```java
-@Aspect
-@Component
-public class OrgContextAspect {
-    @Before("@annotation(RequiresOrg)")
-    public void extractOrgFromJWT(JoinPoint jp) {
-        // Extract JWT from request header
-        // Parse JWT, get organizationId claim
-        // Set OrgContext.setOrgId(organizationId)
-    }
-}
-```
+Create:
+- `backend/src/main/java/com/devopscopilot/backend/controller/AdminController.java`
 
-### Step 5.3 - Create @RequiresOrg Annotation
-**File:** `backend/src/main/java/com/devops/security/RequiresOrg.java`
+Suggested endpoints:
+- `GET /api/v1/admin/organizations`
+- `GET /api/v1/admin/organizations/pending`
+- `GET /api/v1/admin/organization-requests`
+- `POST /api/v1/admin/organization-requests/{id}/approve`
+- `POST /api/v1/admin/organization-requests/{id}/reject`
 
-Marker annotation for endpoints that require org context.
+Behavior when approving one request:
+1. Create or activate the org from that request.
+2. Mark the requesting user as `ACTIVE`.
+3. Promote that user to `ORG_ADMIN`.
+4. Mark the org as `APPROVED`.
+5. Reject every other pending org request with the same `domain_key`.
+6. If the domain already has an approved org, block approval of any other request for that domain.
 
-### Step 5.4 - Update All Incident Endpoints
-**File:** `backend/src/main/java/com/devops/controllers/IncidentController.java`
+### 4.3 System admin security
 
-Add `@RequiresOrg` to all methods. Replace queries:
+Update `backend/src/main/java/com/devopscopilot/backend/config/SecurityConfig.java`
 
-```java
-@PostMapping
-@RequiresOrg
-public ResponseEntity<?> createIncident(@RequestBody IncidentCreateRequest req) {
-    UUID orgId = OrgContext.getOrgId();
-    UUID userId = getCurrentUser().getId();
-    
-    // Verify org is APPROVED
-    Organization org = organizationRepository.findById(orgId).orElseThrow();
-    if (!org.getStatus().equals("APPROVED")) {
-        return forbidden("Organization not approved");
-    }
-    
-    Incident incident = new Incident(...);
-    incident.setOrganizationId(orgId);
-    incident.setCreatedBy(userId);
-    // ... rest of creation logic
-}
+Rules:
+- `SUPER_ADMIN` authority comes from `system_admins`.
+- Use `@PreAuthorize("hasRole('SUPER_ADMIN')")` or equivalent on admin endpoints.
+- Super admin can see all orgs and all org requests.
 
-@GetMapping
-@RequiresOrg
-public ResponseEntity<?> listIncidents(@RequestParam int page, @RequestParam int size) {
-    UUID orgId = OrgContext.getOrgId();
-    
-    Page<Incident> incidents = incidentRepository
-        .findByOrganizationIdOrderByCreatedAtDesc(orgId, PageRequest.of(page, size));
-    
-    return ok(incidents);
-}
+## Phase 5: Org Admin Join Approval Flow
 
-@GetMapping("/{id}")
-@RequiresOrg
-public ResponseEntity<?> getIncident(@PathVariable UUID id) {
-    UUID orgId = OrgContext.getOrgId();
-    
-    Incident incident = incidentRepository
-        .findByIdAndOrganizationId(id, orgId)
-        .orElseThrow(() -> notFound("Incident not found"));
-    
-    return ok(incident);
-}
-```
+### 5.1 Org admin controller
 
-**CRITICAL:** Every single incident query must include `.andOrganizationId(orgId)` filter.
+Create:
+- `backend/src/main/java/com/devopscopilot/backend/controller/OrgAdminController.java`
 
----
+Suggested endpoints:
+- `GET /api/v1/org-admin/join-requests`
+- `POST /api/v1/org-admin/join-requests/{id}/approve`
+- `POST /api/v1/org-admin/join-requests/{id}/reject`
 
-## Phase 6: Admin Dashboard Endpoints (Spring Boot)
-### Step 6.1 - Create AdminController
-**File:** `backend/src/main/java/com/devops/controllers/AdminController.java`
+### 5.2 Org admin service logic
 
-```java
-@RestController
-@RequestMapping("/api/v1/admin")
-public class AdminController {
-    
-    @GetMapping("/orgs/pending")
-    @PreAuthorize("hasRole('SYSTEM_ADMIN')")
-    public ResponseEntity<?> getPendingOrganizations() {
-        List<Organization> pending = organizationRepository
-            .findByStatusOrderByCreatedAtDesc("PENDING");
-        return ok(pending);
-    }
-    
-    @PostMapping("/orgs/{orgId}/approve")
-    @PreAuthorize("hasRole('SYSTEM_ADMIN')")
-    public ResponseEntity<?> approveOrganization(@PathVariable UUID orgId) {
-        Organization org = organizationRepository.findById(orgId).orElseThrow();
-        organizationService.approveOrganization(orgId);
-        return ok(org);
-    }
-    
-    @PostMapping("/orgs/{orgId}/reject")
-    @PreAuthorize("hasRole('SYSTEM_ADMIN')")
-    public ResponseEntity<?> rejectOrganization(
-        @PathVariable UUID orgId,
-        @RequestBody RejectRequest req
-    ) {
-        organizationService.rejectOrganization(orgId, req.getReason());
-        return ok("Organization rejected");
-    }
-    
-    @GetMapping("/dashboard")
-    @PreAuthorize("hasRole('SYSTEM_ADMIN')")
-    public ResponseEntity<?> getDashboardStats() {
-        long pendingCount = organizationRepository.countByStatus("PENDING");
-        long approvedCount = organizationRepository.countByStatus("APPROVED");
-        long rejectedCount = organizationRepository.countByStatus("REJECTED");
-        
-        return ok(new AdminDashboardStats(pendingCount, approvedCount, rejectedCount));
-    }
-}
-```
+Rules:
+1. Only the active org admin for that specific org can approve joiners.
+2. The org must already be approved.
+3. A pending join request does not grant access.
+4. On approval, update the user to:
+   - `organization_id = current org`
+   - `role = MEMBER`
+   - `account_status = ACTIVE`
+5. On rejection, keep the request audited and block login.
 
-### Step 6.2 - Add System Admin Check
-**File:** `backend/src/main/java/com/devops/security/SecurityConfig.java`
+### 5.3 Joiner behavior
 
-Configure Spring Security to:
-- Load SYSTEM_ADMIN role from `system_admins` table
-- Set role only for users in system_admins table
-- Use `@PreAuthorize("hasRole('SYSTEM_ADMIN')")` on admin endpoints
+If an approved org already exists for a `domain_key`, later users should be treated as join requests to that approved org.
 
----
+If no approved org exists yet, the user should create an org request instead.
 
-## Phase 7: Frontend Registration Flow (Next.js)
-### Step 7.1 - Update Register Page
-**File:** `frontend/app/auth/register/page.tsx`
+## Phase 6: Tenant Isolation And Security
 
-```typescript
-export default function RegisterPage() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [orgName, setOrgName] = useState("");
-  const [existingOrg, setExistingOrg] = useState<Organization | null>(null);
-  const [checkingDomain, setCheckingDomain] = useState(false);
+### 6.1 Tenant context
 
-  // Check domain when email changes
-  useEffect(() => {
-    if (!email.includes("@")) return;
-    
-    const domain = email.substring(email.indexOf("@") + 1);
-    setCheckingDomain(true);
-    
-    fetch(`/api/v1/auth/check-domain?domain=${domain}`)
-      .then(r => r.json())
-      .then(data => {
-        setExistingOrg(data.organization);
-        setCheckingDomain(false);
-      });
-  }, [email]);
+Create a simple request-scoped org context if needed:
+- `backend/src/main/java/com/devopscopilot/backend/security/OrgContext.java`
 
-  const handleRegister = async () => {
-    if (existingOrg && !orgName) {
-      // Joining existing org
-      const res = await fetch("/api/v1/auth/register", {
-        method: "POST",
-        body: JSON.stringify({ email, password })
-      });
-      // Handle response
-    } else {
-      // Creating new org
-      const res = await fetch("/api/v1/auth/register", {
-        method: "POST",
-        body: JSON.stringify({ email, password, organizationName: orgName })
-      });
-      // Handle response
-    }
-  };
+Use it to hold:
+- current `organizationId`
+- current role
 
-  return (
-    <div>
-      <input value={email} onChange={e => setEmail(e.target.value)} />
-      <input value={password} onChange={e => setPassword(e.target.value)} />
-      
-      {checkingDomain && <p>Checking organization...</p>}
-      
-      {existingOrg && (
-        <div>
-          <p>Found organization: {existingOrg.name}</p>
-          <button onClick={handleRegister}>Join {existingOrg.name}</button>
-        </div>
-      )}
-      
-      {!existingOrg && !checkingDomain && (
-        <div>
-          <input 
-            value={orgName} 
-            onChange={e => setOrgName(e.target.value)}
-            placeholder="Organization name"
-          />
-          <button onClick={handleRegister} disabled={!orgName}>
-            Create Organization
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-```
+### 6.2 JWT and auth filter
 
-### Step 7.2 - Create Approval Waiting Page
-**File:** `frontend/app/auth/waiting-approval/page.tsx`
+Update:
+- `backend/src/main/java/com/devopscopilot/backend/security/JwtService.java`
+- `backend/src/main/java/com/devopscopilot/backend/security/JwtAuthFilter.java`
+- `backend/src/main/java/com/devopscopilot/backend/security/UserDetailsServiceImpl.java`
 
-Shown after registration if org is PENDING.
+JWT and auth rules:
+- Only mint tokens for active accounts.
+- Include organization claims in the token.
+- Load `SUPER_ADMIN` authority from `system_admins`.
+- Load org role from the active user record.
 
-### Step 7.3 - Create Admin Dashboard Page
-**File:** `frontend/app/admin/organizations/page.tsx`
+### 6.3 Incident access rules
+
+Update:
+- `backend/src/main/java/com/devopscopilot/backend/controller/IncidentController.java`
+- `backend/src/main/java/com/devopscopilot/backend/service/IncidentService.java`
+- `backend/src/main/java/com/devopscopilot/backend/repository/IncidentRepository.java`
+
+Rules:
+- Never query incidents without `organization_id`.
+- Prefer repository methods like `findByIdAndOrganizationId(...)`.
+- Every list query must be org-filtered.
+- Every create/update/delete path must enforce the current org.
+
+### 6.4 Dashboard access
+
+Update:
+- `backend/src/main/java/com/devopscopilot/backend/controller/DashboardController.java`
+- `backend/src/main/java/com/devopscopilot/backend/service/DashboardService.java`
+
+Dashboard rules:
+- Regular users see only their org data.
+- Super admin may see global admin metrics if needed.
+
+## Phase 7: Frontend Flow
+
+### 7.1 Registration page
+
+Update:
+- `frontend/src/app/(auth)/register/page.tsx`
+
+Expected UI behavior:
+- Email, password, username, organization name
+- Explain that approval is required before access
+- Show separate states for:
+  - org request pending super admin approval
+  - join request pending org admin approval
+
+Use the existing Next.js app router and current form style.
+Keep the UI consistent with the repo’s current auth and dashboard pages.
+
+### 7.2 Waiting page
+
+Create:
+- `frontend/src/app/(auth)/waiting-approval/page.tsx`
+
+Purpose:
+- Show that the user has registered successfully but cannot log in yet.
+- Explain whether they are waiting on:
+  - super admin org approval
+  - org admin join approval
+
+### 7.3 Super admin dashboard
+
+Create:
+- `frontend/src/app/admin/organizations/page.tsx`
+- optionally `frontend/src/app/admin/organizations/[id]/page.tsx`
 
 Display:
-- Pending orgs table with [Approve] [Reject] buttons
-- Approved orgs table
-- Stats
+- pending org requests
+- approved orgs
+- rejection reasons
+- approve/reject actions
+- counts by status
 
----
+### 7.4 Org admin dashboard
 
-## Phase 8: RabbitMQ & FastAPI Updates
-### Step 8.1 - Update RabbitMQ Message Schema
-Add `organization_id` to `IncidentAnalysisRequestMessage` and `IncidentAnalysisResultMessage`.
+Create:
+- `frontend/src/app/org-admin/join-requests/page.tsx`
 
-### Step 8.2 - Update FastAPI
-**File:** `ai-service/app/services/analysis_service.py`
+Display:
+- pending join requests for the current org
+- approve/reject actions
+- basic org info
 
-Add org_id to:
-- PostgreSQL query filters (incidents, incident_metrics, incident_logs)
-- RabbitMQ result message construction
+### 7.5 Frontend data flow
 
----
+Prefer the existing fetch patterns already used in the app:
+- cookie-based auth
+- `ApiResponse`
+- simple form submit + status handling
 
-## Phase 9: Testing & Migration
-### Step 9.1 - Database Migration
-1. Run Flyway migrations V2 and V3
-2. Manually insert first system admin into `system_admins` table
+Do not introduce a new state management layer unless needed.
 
-### Step 9.2 - Test Checklist
-- [ ] Alice registers with alice@acme.com, creates "Acme Corp" org
-- [ ] Org appears as PENDING in admin dashboard
-- [ ] Alice can't login (org not approved)
-- [ ] Admin approves org
-- [ ] Alice can now login
-- [ ] Bob registers with bob@acme.com
-- [ ] Bob auto-joins Acme Corp
-- [ ] Bob can immediately use system
-- [ ] Charlie registers with charlie@gmail.com, creates "Charlie's Startup"
-- [ ] Charlie's org is PENDING, Charlie can't login
-- [ ] Admin rejects with reason "Personal email not allowed"
-- [ ] Charlie sees rejection reason, can retry with different name
-- [ ] Alice and Bob see only Acme incidents (not Charlie's)
-- [ ] Incidents table is properly filtered by org_id
+## Phase 8: RabbitMQ And AI Service Updates
 
-### Step 9.3 - Security Audit
-- [ ] No incident query missing org_id filter
-- [ ] All endpoints require @RequiresOrg
-- [ ] JWT contains organization_id claim
-- [ ] System admin role only for users in system_admins table
+### 8.1 Message schema
 
----
+Update:
+- `backend/src/main/java/com/devopscopilot/backend/messaging/IncidentAnalysisRequestMessage.java`
+- `backend/src/main/java/com/devopscopilot/backend/messaging/IncidentAnalysisResultMessage.java`
 
-## Estimated Effort
-- Phase 1-2 (Database + entities): 2-3 hours
-- Phase 3-4 (Auth + orgs): 4-5 hours
-- Phase 5 (Data isolation): 3-4 hours
-- Phase 6 (Admin endpoints): 2-3 hours
-- Phase 7 (Frontend): 3-4 hours
-- Phase 8 (RabbitMQ/FastAPI): 1-2 hours
-- Phase 9 (Testing): 2-3 hours
+Add:
+- `organization_id`
 
-**Total: 17-24 hours (2-3 days for 1 developer)**
+### 8.2 Backend publisher
 
----
+Update the backend path that creates analysis jobs so every message includes the org ID.
 
-## Order of Implementation
-1. Start with Phase 1-2 (DB + entities)
-2. Then Phase 3-4 (repos + auth)
-3. Then Phase 5 (isolation) — do this BEFORE updating all controllers
-4. Then Phase 6 (admin)
-5. Then Phase 7 (frontend)
-6. Then Phase 8 (messaging)
-7. Finally Phase 9 (test)
+### 8.3 AI service
 
-**Do NOT skip Phase 5.** Data isolation must be in place before deploying.
+Update:
+- `ai-service/app/models/messages.py`
+- `ai-service/app/services/rabbitmq.py`
+- `ai-service/app/services/database.py`
+- `ai-service/app/pipeline/graph.py` if needed
+
+Rules:
+- Every database query in the AI service must filter by `organization_id`.
+- The AI service should never mix logs, metrics, or incident results across orgs.
+- If a message is missing org context, reject it or fail safely.
+
+## Phase 9: Migration And Testing
+
+### 9.1 Migration sequence
+
+1. Add the new org tables.
+2. Add the new approval status columns.
+3. Backfill legacy data into a seeded org if needed.
+4. Seed one initial `system_admin`.
+5. Tighten constraints only after the backfill is safe.
+
+### 9.2 Test matrix
+
+Add tests for:
+- first user creates an org request
+- super admin approves one request and auto-rejects duplicates for the same `domain_key`
+- org admin cannot access anything before approval
+- org admin can approve/reject join requests only for their org
+- later signups on an approved domain become join requests, not new orgs
+- login is blocked for pending or rejected accounts
+- incident queries are always org-scoped
+- `gmail.com` and `google.com` behave as grouping keys, not trust signals
+
+### 9.3 Security checks
+
+Verify:
+- no incident query is missing `organization_id`
+- no pending org admin can access protected endpoints
+- `SUPER_ADMIN` only comes from `system_admins`
+- tokens are only minted for active users
+- rejected orgs and rejected joiners cannot log in
+
+## Implementation Order
+
+1. Add migrations and backfill path.
+2. Add org and request entities/repositories.
+3. Update auth registration and login.
+4. Add super admin approval endpoints.
+5. Add org admin join approval endpoints.
+6. Enforce org scoping in incidents and dashboards.
+7. Add frontend pages and status handling.
+8. Update RabbitMQ and AI service org filtering.
+9. Add tests and security audits.
+
+## Key Invariants To Preserve
+
+1. Multiple pending org requests per `domain_key` are allowed.
+2. Only one approved org per `domain_key` is allowed.
+3. Approving one org request auto-rejects the others for that domain.
+4. The first requester becomes org admin only after approval.
+5. Org admins have no access before approval.
+6. Org admins manage joiners for their own org only.
+7. Super admins can view and manage all orgs.
+8. Domain matching is grouping only, not authorization.

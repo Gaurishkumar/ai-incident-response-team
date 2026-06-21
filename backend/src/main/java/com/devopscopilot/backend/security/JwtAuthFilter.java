@@ -36,6 +36,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         if (token != null && jwtService.isTokenValid(token)) {
             String userId = jwtService.extractUserId(token);
             String role   = jwtService.extractRole(token);
+            UUID organizationId = jwtService.extractOrganizationId(token);
             String redisKey = "session:" + userId + ":" + jwtService.hashToken(token);
 
             // Verify session still exists in Redis (allows true logout)
@@ -46,6 +47,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                         null,
                         List.of(new SimpleGrantedAuthority("ROLE_" + role))
                     );
+                auth.setDetails(organizationId);
                 SecurityContextHolder.getContext().setAuthentication(auth);
             }
         }

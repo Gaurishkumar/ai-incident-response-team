@@ -15,6 +15,9 @@ public class IncidentAnalysisRequestMessage {
     @JsonProperty("incident_id")
     private String incidentId;
 
+    @JsonProperty("organization_id")
+    private String organizationId;
+
     @JsonProperty("published_at")
     private String publishedAt;
 }

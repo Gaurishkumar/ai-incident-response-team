@@ -21,7 +21,10 @@ const schema = z.object({
     .min(8, 'Min 8 characters')
     .regex(/[A-Z]/, 'Must contain at least one uppercase letter')
     .regex(/[0-9]/, 'Must contain at least one digit'),
-  role: z.enum(['DEVELOPER', 'ADMIN'] as const),
+  organizationName: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z.string().min(2, 'Min 2 characters').max(255, 'Max 255 characters').optional(),
+  ),
 })
 
 type FormData = z.infer<typeof schema>
@@ -32,27 +35,37 @@ export default function RegisterPage() {
   const [showPassword, setShowPassword] = useState(false)
   const [globalError, setGlobalError] = useState<string | null>(null)
   const [registered, setRegistered] = useState(false)
+  const [resultTitle, setResultTitle] = useState<string>('Account Created')
+  const [statusMessage, setStatusMessage] = useState<string | null>(null)
 
   const {
     register,
     handleSubmit,
-    watch,
-    setValue,
     formState: { errors, isSubmitting },
   } = useForm<FormData>({
     resolver: zodResolver(schema),
     mode: 'onBlur',
-    defaultValues: { role: 'DEVELOPER' },
   })
-
-  const selectedRole = watch('role')
 
   async function onSubmit(data: FormData) {
     setGlobalError(null)
     try {
-      await registerUser(data)
+      const result = await registerUser(data)
+      const orgName = result.organizationName ?? 'your organization'
+      setResultTitle(
+        result.nextStep === 'PENDING_JOIN_APPROVAL'
+          ? 'Join Request Submitted'
+          : 'Organization Request Submitted',
+      )
+      setStatusMessage(
+        result.nextStep === 'PENDING_JOIN_APPROVAL'
+          ? `Your request to join ${orgName} is pending approval.`
+          : `Your organization request for ${orgName} is pending super admin approval.`,
+      )
       setRegistered(true)
-      setTimeout(() => router.push('/login'), 2000)
+      const step = result.nextStep ?? 'PENDING_ORG_APPROVAL'
+      const org = encodeURIComponent(orgName)
+      setTimeout(() => router.push(`/waiting-approval?step=${step}&org=${org}`), 1200)
     } catch (err) {
       if (err instanceof ApiClientError) {
         if (err.status === 400 && err.fields?.length) {
@@ -73,8 +86,10 @@ export default function RegisterPage() {
       <div className="min-h-dvh flex items-center justify-center p-4" style={{ background: 'var(--bg-void)' }}>
         <div className="card-ops p-8 max-w-md w-full text-center animate-slide-up-fade">
           <CheckCircle2 className="w-12 h-12 text-ok mx-auto mb-4" />
-          <h2 className="heading-section text-xl text-ink-primary mb-2">Account Created</h2>
-          <p className="text-sm text-ink-secondary">Redirecting to login…</p>
+          <h2 className="heading-section text-xl text-ink-primary mb-2">{resultTitle}</h2>
+          <p className="text-sm text-ink-secondary">
+            {statusMessage ?? 'Redirecting to the approval waiting page…'}
+          </p>
         </div>
       </div>
     )
@@ -102,7 +117,7 @@ export default function RegisterPage() {
               Create Account
             </h1>
             <p className="text-sm text-ink-secondary">
-              Join the incident response team.
+              Request access by joining an approved organization or creating a new one.
             </p>
           </div>
 
@@ -125,27 +140,6 @@ export default function RegisterPage() {
                   {...register('username')}
                 />
                 {errors.username && <p className="text-xs text-alert">{errors.username.message}</p>}
-              </div>
-
-              <div className="space-y-1.5">
-                <Label>Role</Label>
-                <div className="flex gap-2">
-                  {(['DEVELOPER', 'ADMIN'] as const).map((r) => (
-                    <button
-                      key={r}
-                      type="button"
-                      onClick={() => setValue('role', r, { shouldValidate: true })}
-                      className="flex-1 py-2 rounded-lg text-xs font-mono font-medium border transition-all duration-200"
-                      style={
-                        selectedRole === r
-                          ? { background: 'rgba(245,158,11,0.12)', borderColor: 'rgba(245,158,11,0.4)', color: 'var(--amber)' }
-                          : { background: 'var(--bg-elevated)', borderColor: 'var(--border)', color: 'var(--ink-muted)' }
-                      }
-                    >
-                      {r}
-                    </button>
-                  ))}
-                </div>
               </div>
             </div>
 
@@ -184,6 +178,23 @@ export default function RegisterPage() {
                 </button>
               </div>
               {errors.password && <p className="text-xs text-alert">{errors.password.message}</p>}
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="org-name">Organization name</Label>
+              <Input
+                id="org-name"
+                placeholder="Acme Corp"
+                hasError={!!errors.organizationName}
+                autoComplete="organization"
+                {...register('organizationName')}
+              />
+              {errors.organizationName && (
+                <p className="text-xs text-alert">{errors.organizationName.message}</p>
+              )}
+              <p className="text-[11px] text-ink-muted leading-relaxed">
+                If your email domain already belongs to an approved organization, this name is ignored when you request to join it.
+              </p>
             </div>
 
             <Button type="submit" size="lg" className="w-full mt-2" disabled={isSubmitting}>

@@ -4,6 +4,7 @@ from typing import TypedDict, Optional, List, Dict, Any
 class IncidentAnalysisState(TypedDict):
     # Initialized by FastAPI before pipeline starts — never modified by agents
     incident_id: str
+    organization_id: str
     title: str
     severity: str
     environment: str

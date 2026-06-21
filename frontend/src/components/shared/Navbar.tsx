@@ -3,12 +3,12 @@
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useState } from 'react'
-import { AlertTriangle, LayoutDashboard, LogOut, Plus, User } from 'lucide-react'
+import { AlertTriangle, LayoutDashboard, LogOut, Plus, ShieldCheck, User, UserCheck } from 'lucide-react'
 import { useAuth } from '@/context/AuthContext'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 
-const NAV_LINKS = [
+const BASE_NAV_LINKS = [
   { href: '/dashboard',       label: 'Dashboard',      icon: LayoutDashboard },
   { href: '/incidents/new',   label: 'New Incident',   icon: Plus },
 ]
@@ -18,6 +18,15 @@ export function Navbar() {
   const pathname = usePathname()
   const router = useRouter()
   const [loggingOut, setLoggingOut] = useState(false)
+  const navLinks = [
+    ...BASE_NAV_LINKS,
+    ...(user?.role === 'SUPER_ADMIN'
+      ? [{ href: '/admin/organizations', label: 'Org Approvals', icon: ShieldCheck }]
+      : []),
+    ...(user?.role === 'ORG_ADMIN'
+      ? [{ href: '/org-admin/join-requests', label: 'Join Requests', icon: UserCheck }]
+      : []),
+  ]
 
   async function handleLogout() {
     setLoggingOut(true)
@@ -48,7 +57,7 @@ export function Navbar() {
 
           {/* Nav Links */}
           <div className="hidden md:flex items-center gap-1 flex-1">
-            {NAV_LINKS.map(({ href, label, icon: Icon }) => {
+            {navLinks.map(({ href, label, icon: Icon }) => {
               const active = pathname === href || (href !== '/dashboard' && pathname.startsWith(href))
               return (
                 <Link

@@ -5,6 +5,7 @@ from pydantic import BaseModel
 class IncidentAnalysisRequestMessage(BaseModel):
     message_id: str
     incident_id: str
+    organization_id: str
     published_at: str
 
 
@@ -36,6 +37,7 @@ class RecommendationResult(BaseModel):
 class IncidentAnalysisResultMessage(BaseModel):
     message_id: str
     incident_id: str
+    organization_id: str
     analysis_status: str  # COMPLETED | PARTIAL | FAILED
     agent_runs: List[AgentRunResult]
     root_cause: Optional[RootCauseResult] = None

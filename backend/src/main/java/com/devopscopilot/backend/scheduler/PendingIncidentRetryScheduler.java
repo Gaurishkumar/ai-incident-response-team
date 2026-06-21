@@ -29,7 +29,7 @@ public class PendingIncidentRetryScheduler {
             log.info("Retry scheduler: found {} stuck PENDING incident(s)", stuck.size());
             for (Incident incident : stuck) {
                 log.info("Republishing analysis request for stuck incident {}", incident.getId());
-                incidentService.publishAnalysisRequest(incident.getId());
+                incidentService.publishAnalysisRequest(incident.getId(), incident.getOrganizationId());
             }
         }
     }

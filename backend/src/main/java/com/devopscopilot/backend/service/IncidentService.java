@@ -39,6 +39,8 @@ public class IncidentService {
     private final IncidentAnalysisRepository analysisRepository;
     private final RecommendationRepository recommendationRepository;
     private final UserRepository userRepository;
+    private final SystemAdminRepository systemAdminRepository;
+    private final OrganizationRepository organizationRepository;
     private final RabbitTemplate rabbitTemplate;
     private final RedisTemplate<String, Object> redisTemplate;
     private final Counter incidentsSubmittedCounter;
@@ -55,6 +57,8 @@ public class IncidentService {
             IncidentAnalysisRepository analysisRepository,
             RecommendationRepository recommendationRepository,
             UserRepository userRepository,
+            SystemAdminRepository systemAdminRepository,
+            OrganizationRepository organizationRepository,
             RabbitTemplate rabbitTemplate,
             RedisTemplate<String, Object> redisTemplate,
             MeterRegistry meterRegistry) {
@@ -65,6 +69,8 @@ public class IncidentService {
         this.analysisRepository = analysisRepository;
         this.recommendationRepository = recommendationRepository;
         this.userRepository = userRepository;
+        this.systemAdminRepository = systemAdminRepository;
+        this.organizationRepository = organizationRepository;
         this.rabbitTemplate = rabbitTemplate;
         this.redisTemplate = redisTemplate;
         this.incidentsSubmittedCounter = Counter.builder("incidents_submitted_total")
@@ -77,10 +83,11 @@ public class IncidentService {
 
     @Transactional
     public IncidentSummaryResponse createIncident(IncidentCreateRequest req, UUID userId) {
-        User user = userRepository.findById(userId)
-            .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED));
+        User user = resolveActiveUser(userId);
+        if (user.getOrganizationId() == null || isSuperAdmin(userId)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Organization access required");
+        }
 
-        // Three inserts in one atomic transaction
         Incident incident = incidentRepository.save(Incident.builder()
             .title(req.getIncidentTitle())
             .description(req.getDescription())
@@ -88,6 +95,7 @@ public class IncidentService {
             .severity(req.getSeverity())
             .affectedServices(req.getAffectedServices())
             .createdBy(user)
+            .organizationId(user.getOrganizationId())
             .status("PENDING")
             .build());
 
@@ -112,7 +120,7 @@ public class IncidentService {
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                publishAnalysisRequest(incidentId);
+                publishAnalysisRequest(incidentId, user.getOrganizationId());
             }
         });
 
@@ -127,11 +135,12 @@ public class IncidentService {
             .build();
     }
 
-    public void publishAnalysisRequest(UUID incidentId) {
+    public void publishAnalysisRequest(UUID incidentId, UUID organizationId) {
         try {
             IncidentAnalysisRequestMessage msg = IncidentAnalysisRequestMessage.builder()
                 .messageId(UUID.randomUUID().toString())
                 .incidentId(incidentId.toString())
+                .organizationId(organizationId != null ? organizationId.toString() : null)
                 .publishedAt(OffsetDateTime.now().toString())
                 .build();
 
@@ -149,26 +158,58 @@ public class IncidentService {
     }
 
     public Page<IncidentSummaryResponse> listIncidents(
-            String status, String severity, int page, int size) {
+            String userId, String status, String severity, int page, int size) {
+        User user = resolveActiveUser(UUID.fromString(userId));
         Pageable pageable = PageRequest.of(page, Math.min(size, 100));
         Page<Incident> incidents;
 
-        if (status != null && severity != null) {
-            incidents = incidentRepository.findByStatusAndSeverityOrderByCreatedAtDesc(
-                status, severity, pageable);
-        } else if (status != null) {
-            incidents = incidentRepository.findByStatusOrderByCreatedAtDesc(status, pageable);
-        } else if (severity != null) {
-            incidents = incidentRepository.findBySeverityOrderByCreatedAtDesc(severity, pageable);
+        if (isSuperAdmin(user.getId())) {
+            if (status != null && severity != null) {
+                incidents = incidentRepository.findByStatusAndSeverityOrderByCreatedAtDesc(
+                    status, severity, pageable);
+            } else if (status != null) {
+                incidents = incidentRepository.findByStatusOrderByCreatedAtDesc(status, pageable);
+            } else if (severity != null) {
+                incidents = incidentRepository.findBySeverityOrderByCreatedAtDesc(severity, pageable);
+            } else {
+                incidents = incidentRepository.findAllByOrderByCreatedAtDesc(pageable);
+            }
+        } else if (isOrgAdmin(user)) {
+            UUID orgId = user.getOrganizationId();
+            if (status != null && severity != null) {
+                incidents = incidentRepository.findByOrganizationIdAndStatusAndSeverityOrderByCreatedAtDesc(
+                    orgId, status, severity, pageable);
+            } else if (status != null) {
+                incidents = incidentRepository.findByOrganizationIdAndStatusOrderByCreatedAtDesc(
+                    orgId, status, pageable);
+            } else if (severity != null) {
+                incidents = incidentRepository.findByOrganizationIdAndSeverityOrderByCreatedAtDesc(
+                    orgId, severity, pageable);
+            } else {
+                incidents = incidentRepository.findAllByOrganizationIdOrderByCreatedAtDesc(orgId, pageable);
+            }
         } else {
-            incidents = incidentRepository.findAllByOrderByCreatedAtDesc(pageable);
+            UUID creatorId = user.getId();
+            if (status != null && severity != null) {
+                incidents = incidentRepository.findByCreatedByIdAndStatusAndSeverityOrderByCreatedAtDesc(
+                    creatorId, status, severity, pageable);
+            } else if (status != null) {
+                incidents = incidentRepository.findByCreatedByIdAndStatusOrderByCreatedAtDesc(
+                    creatorId, status, pageable);
+            } else if (severity != null) {
+                incidents = incidentRepository.findByCreatedByIdAndSeverityOrderByCreatedAtDesc(
+                    creatorId, severity, pageable);
+            } else {
+                incidents = incidentRepository.findAllByCreatedByIdOrderByCreatedAtDesc(creatorId, pageable);
+            }
         }
 
         return incidents.map(this::toSummary);
     }
 
     @SuppressWarnings("unchecked")
-    public IncidentDetailResponse getIncidentDetail(UUID incidentId) {
+    public IncidentDetailResponse getIncidentDetail(String userId, UUID incidentId) {
+        User user = resolveActiveUser(UUID.fromString(userId));
         String cacheKey = RESULT_CACHE_PREFIX + incidentId;
         Object cached = redisTemplate.opsForValue().get(cacheKey);
         if (cached instanceof Map<?, ?> map) {
@@ -176,8 +217,14 @@ public class IncidentService {
             // For simplicity, fall through and rebuild — cache stores the serialized form
         }
 
-        Incident incident = incidentRepository.findById(incidentId)
-            .orElseThrow(() -> new IncidentNotFoundException(incidentId));
+        Incident incident = isSuperAdmin(user.getId())
+            ? incidentRepository.findById(incidentId)
+                .orElseThrow(() -> new IncidentNotFoundException(incidentId))
+            : isOrgAdmin(user)
+                ? incidentRepository.findByIdAndOrganizationId(incidentId, user.getOrganizationId())
+                    .orElseThrow(() -> new IncidentNotFoundException(incidentId))
+                : incidentRepository.findByIdAndCreatedById(incidentId, user.getId())
+                    .orElseThrow(() -> new IncidentNotFoundException(incidentId));
 
         IncidentMetrics metrics = metricsRepository.findByIncidentId(incidentId).orElse(null);
         IncidentLog log         = logRepository.findByIncidentId(incidentId).orElse(null);
@@ -212,9 +259,16 @@ public class IncidentService {
         return detail;
     }
 
-    public IncidentStatusResponse getIncidentStatus(UUID incidentId) {
-        Incident incident = incidentRepository.findById(incidentId)
-            .orElseThrow(() -> new IncidentNotFoundException(incidentId));
+    public IncidentStatusResponse getIncidentStatus(String userId, UUID incidentId) {
+        User user = resolveActiveUser(UUID.fromString(userId));
+        Incident incident = isSuperAdmin(user.getId())
+            ? incidentRepository.findById(incidentId)
+                .orElseThrow(() -> new IncidentNotFoundException(incidentId))
+            : isOrgAdmin(user)
+                ? incidentRepository.findByIdAndOrganizationId(incidentId, user.getOrganizationId())
+                    .orElseThrow(() -> new IncidentNotFoundException(incidentId))
+                : incidentRepository.findByIdAndCreatedById(incidentId, user.getId())
+                    .orElseThrow(() -> new IncidentNotFoundException(incidentId));
 
         List<AgentRun> runs = agentRunRepository.findByIncidentIdOrderByStartedAtAsc(incidentId);
         return IncidentStatusResponse.builder()
@@ -225,6 +279,41 @@ public class IncidentService {
 
     public void evictIncidentCache(UUID incidentId) {
         redisTemplate.delete(RESULT_CACHE_PREFIX + incidentId);
+    }
+
+    private User resolveActiveUser(UUID userId) {
+        User user = userRepository.findById(userId)
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED));
+
+        if (!Boolean.TRUE.equals(user.getIsActive()) || !"ACTIVE".equals(user.getAccountStatus())) {
+            throw new ResponseStatusException(HttpStatus.LOCKED, "Account not yet approved");
+        }
+
+        if (isSuperAdmin(userId)) {
+            return user;
+        }
+
+        UUID organizationId = user.getOrganizationId();
+        if (organizationId == null) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Organization access required");
+        }
+
+        boolean approved = organizationRepository.findById(organizationId)
+            .map(org -> "APPROVED".equals(org.getStatus()))
+            .orElse(false);
+        if (!approved) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Organization is not approved yet");
+        }
+
+        return user;
+    }
+
+    private boolean isSuperAdmin(UUID userId) {
+        return systemAdminRepository.existsByUserId(userId);
+    }
+
+    private boolean isOrgAdmin(User user) {
+        return "ORG_ADMIN".equals(user.getRole());
     }
 
     // ---- Mappers ----

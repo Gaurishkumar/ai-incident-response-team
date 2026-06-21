@@ -187,6 +187,14 @@ docker compose up prometheus grafana -d
 | Spring Boot API | http://localhost:8080 | — |
 | FastAPI | http://localhost:8000/health | — |
 
+**Bootstrap super admin**
+
+The backend seeds a local super admin on startup if no `system_admins` row exists yet.
+
+- Email: `admin@local.test`
+- Username: `admin`
+- Password: `Admin123!`
+
 ---
 
 ## Project Structure

@@ -8,14 +8,18 @@ export interface RegisterRequest {
   username: string
   email: string
   password: string
-  role: 'DEVELOPER' | 'ADMIN'
+  organizationName?: string
 }
 
 export interface UserResponse {
   id: string
   username: string
   email: string
-  role: 'DEVELOPER' | 'ADMIN'
+  role: 'DEVELOPER' | 'ADMIN' | 'MEMBER' | 'ORG_ADMIN' | 'SUPER_ADMIN'
+  organizationId?: string | null
+  organizationName?: string | null
+  accountStatus?: 'PENDING' | 'ACTIVE' | 'REJECTED' | 'LOCKED'
+  nextStep?: 'PENDING_ORG_APPROVAL' | 'PENDING_JOIN_APPROVAL' | null
   createdAt: string
 }
 
@@ -23,7 +27,41 @@ export interface AuthResponse {
   token: string
   tokenType: 'Bearer'
   expiresIn: number
+  organizationId?: string | null
   user: UserResponse
+}
+
+export interface OrganizationJoinRequestResponse {
+  id: string
+  organizationId: string
+  userId: string
+  username: string | null
+  email: string | null
+  status: 'PENDING' | 'APPROVED' | 'REJECTED'
+  rejectionReason: string | null
+  createdAt: string
+}
+
+export interface OrganizationRequestResponse {
+  id: string
+  domainKey: string
+  orgName: string
+  requestedByUserId: string
+  status: 'PENDING' | 'APPROVED' | 'REJECTED'
+  rejectionReason: string | null
+  approvedOrganizationId: string | null
+  createdAt: string
+}
+
+export interface OrganizationResponse {
+  id: string
+  domainKey: string
+  name: string
+  ownerUserId: string
+  status: 'APPROVED' | 'SUSPENDED'
+  approvedByUserId: string | null
+  approvedAt: string | null
+  createdAt: string
 }
 
 /* ─── Incidents ──────────────────────────────────────────────────────── */
