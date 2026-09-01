@@ -30,26 +30,29 @@ public class IncidentController {
 
     @GetMapping
     public ResponseEntity<ApiResponse<Page<IncidentSummaryResponse>>> listIncidents(
+            @AuthenticationPrincipal String userId,
             @RequestParam(required = false) String status,
             @RequestParam(required = false) String severity,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size) {
         Page<IncidentSummaryResponse> incidents =
-            incidentService.listIncidents(status, severity, page, size);
+            incidentService.listIncidents(userId, status, severity, page, size);
         return ResponseEntity.ok(ApiResponse.ok(incidents));
     }
 
     @GetMapping("/{id}")
     public ResponseEntity<ApiResponse<IncidentDetailResponse>> getIncident(
+            @AuthenticationPrincipal String userId,
             @PathVariable UUID id) {
-        IncidentDetailResponse detail = incidentService.getIncidentDetail(id);
+        IncidentDetailResponse detail = incidentService.getIncidentDetail(userId, id);
         return ResponseEntity.ok(ApiResponse.ok(detail));
     }
 
     @GetMapping("/{id}/status")
     public ResponseEntity<ApiResponse<IncidentStatusResponse>> getIncidentStatus(
+            @AuthenticationPrincipal String userId,
             @PathVariable UUID id) {
-        IncidentStatusResponse status = incidentService.getIncidentStatus(id);
+        IncidentStatusResponse status = incidentService.getIncidentStatus(userId, id);
         return ResponseEntity.ok(ApiResponse.ok(status));
     }
 }

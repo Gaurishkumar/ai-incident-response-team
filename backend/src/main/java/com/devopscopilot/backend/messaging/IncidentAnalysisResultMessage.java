@@ -16,6 +16,9 @@ public class IncidentAnalysisResultMessage {
     @JsonProperty("incident_id")
     private String incidentId;
 
+    @JsonProperty("organization_id")
+    private String organizationId;
+
     @JsonProperty("analysis_status")
     private String analysisStatus;
 

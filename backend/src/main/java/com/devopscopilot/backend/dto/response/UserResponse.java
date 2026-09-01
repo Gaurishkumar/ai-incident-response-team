@@ -12,5 +12,9 @@ public class UserResponse {
     private String username;
     private String email;
     private String role;
+    private UUID organizationId;
+    private String organizationName;
+    private String accountStatus;
+    private String nextStep;
     private OffsetDateTime createdAt;
 }

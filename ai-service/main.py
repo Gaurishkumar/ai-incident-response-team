@@ -88,10 +88,16 @@ async def process_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
             return
 
         incident_id = body.get("incident_id")
+        organization_id = body.get("organization_id")
         message_id = body.get("message_id")
 
         if not incident_id:
             logger.error("Message has no incident_id, routing to DLQ")
+            await message.nack(requeue=False)
+            return
+
+        if not organization_id:
+            logger.error(f"[{incident_id}] Message has no organization_id, routing to DLQ")
             await message.nack(requeue=False)
             return
 
@@ -104,19 +110,19 @@ async def process_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
         logger.info(f"[{incident_id}] Received analysis request")
 
         # --- Fetch data from PostgreSQL ----------------------------------------
-        incident = await database_service.get_incident(incident_id)
+        incident = await database_service.get_incident(incident_id, organization_id)
         if not incident:
             logger.error(f"[{incident_id}] Incident not found in DB, routing to DLQ")
             await message.nack(requeue=False)
             return
 
-        metrics = await database_service.get_incident_metrics(incident_id)
+        metrics = await database_service.get_incident_metrics(incident_id, organization_id)
         if not metrics:
             logger.error(f"[{incident_id}] Metrics not found, routing to DLQ")
             await message.nack(requeue=False)
             return
 
-        raw_logs = await database_service.get_incident_logs(incident_id)
+        raw_logs = await database_service.get_incident_logs(incident_id, organization_id)
         if not raw_logs:
             logger.error(f"[{incident_id}] Logs not found, routing to DLQ")
             await message.nack(requeue=False)
@@ -125,6 +131,7 @@ async def process_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
         # --- Build initial LangGraph state ------------------------------------
         initial_state: IncidentAnalysisState = {
             "incident_id": incident_id,
+            "organization_id": organization_id,
             "title": incident["title"],
             "severity": incident["severity"],
             "environment": incident["environment"],
@@ -188,6 +195,7 @@ async def process_message(message: aio_pika.abc.AbstractIncomingMessage) -> None
         result_message = {
             "message_id": message_id or str(uuid4()),
             "incident_id": incident_id,
+            "organization_id": organization_id,
             "analysis_status": analysis_status,
             "agent_runs": agent_runs,
             "root_cause": final_state.get("root_cause"),

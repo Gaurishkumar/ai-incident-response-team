@@ -44,7 +44,7 @@ export default function LoginPage() {
         if (err.status === 401) {
           setGlobalError('Invalid email or password. Please try again.')
         } else if (err.status === 423) {
-          setGlobalError('Your account has been deactivated. Contact your administrator.')
+          setGlobalError('Your account is not active yet or has been deactivated.')
         } else if (err.status === 429) {
           setIsRateLimited(true)
         } else if (err.status === 0) {

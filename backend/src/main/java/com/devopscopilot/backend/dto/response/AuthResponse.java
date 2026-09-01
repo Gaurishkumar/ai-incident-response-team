@@ -11,4 +11,5 @@ public class AuthResponse {
     private String tokenType;
     private long expiresIn;
     private UserResponse user;
+    private UUID organizationId;
 }
